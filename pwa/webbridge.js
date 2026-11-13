@@ -564,7 +564,7 @@
     await ready();
     if (!files.length) return conns.length > 0;
     busyCb();
-    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    askPersist();
     try { await importFiles(files); } catch (e) { alert('가져오지 못했습니다.\n' + (e.message || e)); }
     progress('불러오는 중…');
     if (!conns.length && hasDom) { const b = document.getElementById('busy'); if (b) b.hidden = true; }
@@ -829,14 +829,17 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   }
+  // shareDone: 사용자가 공유 창을 취소하지 않고 실제로 저장/공유했는지 (백업 기록용)
+  let shareDone = false;
   async function shareOrSave(name, blob) {
     const file = new File([blob], name, { type: blob.type });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try { await navigator.share({ files: [file] }); return; } catch (e) {
+      try { await navigator.share({ files: [file] }); shareDone = true; return; } catch (e) {
         if (e.name === 'AbortError') return;
       }
     }
     download(name, blob);
+    shareDone = true;
   }
   const fromBase64 = (data, type) => { const s = atob(data), b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return new Blob([b], { type }); };
 
@@ -919,19 +922,105 @@
   };
   W.WebBridge = api;
 
+  // ---------------------------------------------------------------- 데이터 지키기
+  // 1) iOS에 '영구 보관'을 요청해서 저장 공간이 부족해도 자동으로 지우지 않게 한다.
+  // 2) 백업 파일을 저장/공유할 때마다 기록해 두고, 백업 안 된 북마크가 쌓이면 백업하라고 알린다.
+  //    (웹앱은 사용자 동작 없이 '파일' 앱에 저장할 수 없어서 완전 자동 백업은 불가능하다)
+  const BACKUP_KEY = '__lastBackup', SNOOZE_KEY = '__backupSnooze';
+  let persisted = null;
+  const readJson = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } };
+  const markHashes = () => readJson('bookmarks', []).map(m => hash(JSON.stringify(m)));
+  function unsaved() {
+    const done = new Set(readJson(BACKUP_KEY, {}).marks || []);
+    return markHashes().filter(h => !done.has(h)).length;
+  }
+  function recordBackup() {
+    try { localStorage.setItem(BACKUP_KEY, JSON.stringify({ at: Date.now(), marks: markHashes() })); } catch (e) { /* 무시 */ }
+    const r = hasDom && document.getElementById('webRemind');
+    if (r) r.remove();
+    updateStatus();
+  }
+  for (const k of ['saveText', 'shareFile']) {
+    const f = api[k];
+    api[k] = async (name, ...rest) => {
+      shareDone = false;
+      const r = await f(name, ...rest);
+      if (shareDone && /^DAA_북마크백업_/.test(name)) recordBackup();
+      return r;
+    };
+  }
+  async function askPersist() {
+    try {
+      if (navigator.storage && navigator.storage.persisted) {
+        persisted = await navigator.storage.persisted();
+        if (!persisted && navigator.storage.persist) persisted = await navigator.storage.persist();
+      }
+    } catch (e) { /* 지원 안 함 */ }
+    updateStatus();
+  }
+  function updateStatus() {
+    const anchor = hasDom && document.getElementById('btnImport');
+    if (!anchor) return;
+    let note = document.getElementById('webStore');
+    if (!note) {
+      note = document.createElement('p');
+      note.id = 'webStore';
+      note.className = 'setNote';
+      note.style.whiteSpace = 'pre-line';
+      anchor.parentNode.append(note);
+    }
+    const last = readJson(BACKUP_KEY, null), n = unsaved();
+    const when = last ? new Date(last.at).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '아직 없음';
+    note.textContent = [
+      '보관 상태: ' + (persisted ? '영구 보관 (저장 공간이 부족해도 iOS가 지우지 않음)' : persisted === false ? '일반 보관 (저장 공간이 부족하면 iOS가 지울 수 있음)' : '확인 중'),
+      '마지막 백업: ' + when + (n ? ` · 백업 안 된 북마크 ${n}개` : ''),
+      "홈 화면에서 앱 아이콘을 삭제하면 가져온 음악과 북마크가 함께 지워집니다. 백업 파일은 '파일' 앱이나 iCloud Drive에 저장해 두세요.",
+    ].join('\n');
+  }
+  function banner(id, html, buttons) {
+    if (document.getElementById(id)) return null;
+    const box = document.createElement('div');
+    box.id = id;
+    box.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:9999;background:#1d1d27;color:#fff;border:1px solid #3a3a4a;border-radius:14px;padding:14px;font:14px/1.5 -apple-system,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5)';
+    box.innerHTML = html;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px';
+    for (const [label, main, fn] of buttons) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = `border:0;border-radius:10px;padding:8px 14px;font:600 14px -apple-system,sans-serif;color:#fff;background:${main ? '#ff5a7a' : '#333'}`;
+      b.onclick = () => { box.remove(); fn(); };
+      row.append(b);
+    }
+    box.append(row);
+    document.body.append(box);
+    return box;
+  }
+  function remind() {
+    if (document.visibilityState !== 'visible') return;
+    const n = unsaved(), last = readJson(BACKUP_KEY, null);
+    if (!n || Date.now() < Number(localStorage.getItem(SNOOZE_KEY) || 0)) return;
+    if (n < 3 && !(last && Date.now() - last.at > 7 * 864e5)) return;
+    banner('webRemind', `<b>북마크 ${n}개가 아직 백업되지 않았습니다</b><br><span style="color:#aaa">앱을 지우거나 사이트 데이터를 지우면 함께 사라집니다. 공유 창에서 '파일에 저장'을 고르세요.</span>`, [
+      ['나중에', false, () => { try { localStorage.setItem(SNOOZE_KEY, String(Date.now() + 864e5)); } catch (e) { /* 무시 */ } }],
+      ['지금 백업', true, () => { const b = document.getElementById('btnBackupSave'); if (b) b.click(); }],
+    ]);
+  }
+
   // ---------------------------------------------------------------- 설치 안내 / 오프라인
   if (hasDom) {
     if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
     const standalone = navigator.standalone || (W.matchMedia && W.matchMedia('(display-mode: standalone)').matches);
     const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    if (ios && !standalone) {
-      document.addEventListener('DOMContentLoaded', () => {
-        const box = document.createElement('div');
-        box.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:9999;background:#1d1d27;color:#fff;border:1px solid #3a3a4a;border-radius:14px;padding:14px 40px 14px 14px;font:14px/1.5 -apple-system,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5)';
-        box.innerHTML = '<b>앱으로 설치하세요</b><br>아래 <b>공유 버튼(□↑)</b> → <b>\'홈 화면에 추가\'</b>를 누르면 앱처럼 쓸 수 있습니다.<br><span style="color:#aaa">Safari에서 가져온 음악은 설치한 앱에 보이지 않으니, 설치 후 앱에서 가져와 주세요.</span><button aria-label="닫기" style="position:absolute;top:8px;right:8px;width:28px;height:28px;border:0;border-radius:14px;background:#333;color:#fff;font-size:16px">×</button>';
-        box.querySelector('button').onclick = () => box.remove();
-        document.body.append(box);
-      });
-    }
+    document.addEventListener('DOMContentLoaded', () => {
+      askPersist();
+      if (ios && !standalone) {
+        banner('webInstall', '<b>앱으로 설치하세요</b><br>아래 <b>공유 버튼(□↑)</b> → <b>\'홈 화면에 추가\'</b>를 누르면 앱처럼 쓸 수 있습니다.<br><span style="color:#aaa">Safari에서 가져온 음악과 북마크는 설치한 앱에 보이지 않으니, 설치 후 앱에서 가져와 주세요.</span>', [['닫기', false, () => {}]]);
+        return;
+      }
+      setTimeout(remind, 4000);
+      document.addEventListener('click', () => setTimeout(updateStatus, 300), true);
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { updateStatus(); setTimeout(remind, 1500); } });
+    });
   }
 })();

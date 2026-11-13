@@ -888,7 +888,7 @@
     }, null, 2);
   }
   const backupName = () => `DAA_북마크백업_${stamp()}.json`;
-  if (isIOS) $('btnBackupSave').textContent = '전체 백업 파일 저장 (파일 앱)';
+  if (isIOS || B.web) $('btnBackupSave').textContent = '전체 백업 파일 저장 (파일 앱)';
   $('btnBackupSave').onclick = async () => {
     if (!marks().length) { toast('저장된 북마크가 없습니다.'); return; }
     try {
