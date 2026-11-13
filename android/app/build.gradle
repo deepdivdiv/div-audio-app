@@ -1,0 +1,121 @@
+apply plugin: 'com.android.application'
+
+// 출시 서명 정보. 비밀번호가 들어 있어 저장소에 넣지 않는다.
+def keystoreFile = rootProject.file('../keystore/keystore.properties')
+def keystore = new Properties()
+if (keystoreFile.exists()) {
+    keystoreFile.withInputStream { keystore.load(it) }
+}
+
+android {
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+    namespace = "com.snet.musicapk"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.snet.musicapk"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 9
+        versionName "1.8"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    buildFeatures {
+        buildConfig = true
+    }
+    flavorDimensions = ["distribution"]
+    productFlavors {
+        // 지금까지 쓰던 앱. 패키지가 같아서 덮어 설치하면 북마크가 유지된다.
+        personal {
+            dimension "distribution"
+            buildConfigField "boolean", "STORE", "false"
+        }
+        // Google Play 버전. 패키지 ID는 첫 업로드 뒤에는 바꿀 수 없다.
+        store {
+            dimension "distribution"
+            applicationId "com.snet.divaudio"
+            minSdkVersion 29
+            buildConfigField "boolean", "STORE", "true"
+        }
+        // 원스토어 버전. 원스토어는 다른 마켓과 패키지 이름을 나누라고 권한다. 등록 뒤에는 바꿀 수 없다.
+        // 업로드 키로 직접 서명한 APK를 올린다(원스토어 콘솔: 바이너리 유형 APK, 서명키 '앱 서명 사용 안함').
+        onestore {
+            dimension "distribution"
+            applicationId "com.snet.divaudio.onestore"
+            minSdkVersion 29
+            buildConfigField "boolean", "STORE", "true"
+        }
+    }
+    // 권한은 Google Play 버전과 같다.
+    sourceSets {
+        onestore.manifest.srcFile 'src/store/AndroidManifest.xml'
+    }
+    signingConfigs {
+        // 개인용 APK가 어느 PC에서 빌드해도 덮어 설치되도록 키를 프로젝트에 고정한다.
+        personal {
+            storeFile rootProject.file('../keystore/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        release {
+            if (keystoreFile.exists()) {
+                storeFile rootProject.file('../keystore/' + keystore['storeFile'])
+                storePassword keystore['storePassword']
+                keyAlias keystore['keyAlias']
+                keyPassword keystore['keyPassword']
+            }
+        }
+    }
+    buildTypes {
+        debug {
+            if (rootProject.file('../keystore/debug.keystore').exists()) {
+                signingConfig signingConfigs.personal
+            }
+        }
+        release {
+            if (keystoreFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation "androidx.media3:media3-exoplayer:1.8.0"
+    implementation "androidx.media3:media3-session:1.8.0"
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
